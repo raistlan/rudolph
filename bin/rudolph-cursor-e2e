@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# rudolph-cursor-e2e — launch (and poll) a Cursor Cloud Agent to run the
+# /agent-e2e-testing flow against a branch. This is rudolph phase 7: the
+# E2E step lives in Cursor's cloud, so we fire it over the API instead of
+# asking the user to kick it off by hand.
+#
+# Cursor Cloud Agents API (verified 2026-06):
+#   POST https://api.cursor.com/v1/agents
+#   GET  https://api.cursor.com/v1/agents/{id}/runs/{runId}
+#   Docs: https://cursor.com/docs/cloud-agent/api/endpoints
+#
+# Auth: CURSOR_API_KEY (from https://cursor.com/dashboard/api). Loaded from
+# rudolph/.env if present, else ambient env. Never echoed.
+#
+# Prereqs: a paid Cursor plan + the Cursor GitHub App installed on the repo.
+#
+# Usage:
+#   rudolph-cursor-e2e launch <branch> [<prompt-file>]
+#       Launch a cloud agent on <branch>. Without a prompt file, a generic
+#       E2E instruction is used; pass a file to tailor the scenario.
+#   rudolph-cursor-e2e status <agent-id> <run-id>
+#       Print the run's status (FINISHED | RUNNING | ERROR | CANCELLED | ...).
+
+set -euo pipefail
+
+# shellcheck source=../lib/load-env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/load-env.sh"
+
+REPO_URL="${RUDOLPH_REPO_URL:-https://github.com/your-org/your-repo}"
+MODEL_ID="${RUDOLPH_CURSOR_MODEL:-claude-sonnet-4-5}"
+API="https://api.cursor.com/v1"
+
+fail() { printf "❌ %s\n" "$*" >&2; exit 1; }
+
+command -v jq   >/dev/null 2>&1 || fail "jq is required (brew install jq)."
+command -v curl >/dev/null 2>&1 || fail "curl is required."
+[ -n "${CURSOR_API_KEY:-}" ] || fail "CURSOR_API_KEY not set. Create one at https://cursor.com/dashboard/api and add it to rudolph/.env as: CURSOR_API_KEY=..."
+
+case "${1:-}" in
+  launch)
+    BRANCH="${2:-}"
+    [ -n "$BRANCH" ] || fail "usage: rudolph-cursor-e2e launch <branch> [<prompt-file>]"
+    PROMPT_FILE="${3:-}"
+    if [ -n "$PROMPT_FILE" ]; then
+      [ -f "$PROMPT_FILE" ] || fail "prompt file not found: $PROMPT_FILE"
+      PROMPT="$(cat "$PROMPT_FILE")"
+    else
+      PROMPT="Run the /agent-e2e-testing skill end-to-end against this branch ($BRANCH). Use the computerUse subagent for all browser interactions and seed fixtures just-in-time. If you create a test provider, use your project's designated test NPI (never reuse a shared placeholder NPI that other fixtures depend on). Exercise the primary user-facing flow affected by this branch and report pass/fail per scenario with screenshots. Do NOT open a pull request."
+    fi
+
+    PAYLOAD="$(jq -n \
+      --arg text  "$PROMPT" \
+      --arg url   "$REPO_URL" \
+      --arg ref   "$BRANCH" \
+      --arg model "$MODEL_ID" \
+      '{prompt:{text:$text}, model:{id:$model}, repos:[{url:$url, startingRef:$ref}], autoCreatePR:false}')"
+
+    RESP="$(curl -sS -X POST "$API/agents" \
+      -H "Authorization: Bearer $CURSOR_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "$PAYLOAD")"
+
+    # The current API nests the result under {agent:{...}, run:{...}}; older
+    # shapes returned a flat object. Parse both, preferring the nested form.
+    AGENT_ID="$(echo "$RESP" | jq -r '.agent.id // .id // empty')"
+    [ -n "$AGENT_ID" ] || fail "launch failed — Cursor response: $RESP"
+    RUN_ID="$(echo "$RESP" | jq -r '.run.id // .agent.latestRunId // .runs[0].id // .runId // empty')"
+    URL="$(echo "$RESP"   | jq -r '.agent.url // .url // .runs[0].url // empty')"
+    echo "agentId=$AGENT_ID"
+    echo "runId=$RUN_ID"
+    echo "url=$URL"
+    ;;
+  status)
+    AGENT_ID="${2:-}"; RUN_ID="${3:-}"
+    [ -n "$AGENT_ID" ] && [ -n "$RUN_ID" ] || fail "usage: rudolph-cursor-e2e status <agent-id> <run-id>"
+    curl -sS "$API/agents/$AGENT_ID/runs/$RUN_ID" \
+      -H "Authorization: Bearer $CURSOR_API_KEY" \
+      | jq '{status, durationMs, prUrl: (.git.branches[0].prUrl // null), result}'
+    ;;
+  *)
+    fail "usage: rudolph-cursor-e2e {launch <branch> [prompt-file] | status <agent-id> <run-id>}"
+    ;;
+esac
