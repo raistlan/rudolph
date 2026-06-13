@@ -80,7 +80,7 @@ user what's next. Bump the pointer **before** yielding so a crash resumes cleanl
 | 2 | Architecture review | **GATE** — `craft-architect` loop in this session | `00-plan.md` | `01-architecture.md` |
 | 3 | Implement + TDD (Red→Green) | subagent | `00`,`01` | `02-implementation.md` |
 | 4 | Test audit + necessity breakdown | subagent (+ conditional gate) | `02` + diff | `03-test-audit.md` |
-| 5 | De-slop | subagent | diff | `04-slop-report.md` |
+| 5 | De-slop | `code-simplifier` + subagent | diff | `04-slop-report.md` |
 | 6 | PR draft + description | subagent (**diff only**) | `git diff` | `05-pr-description.md` |
 | 7 | Cursor cloud E2E | `bin/rudolph-cursor-e2e` | branch | `state.cursor` |
 | 8 | Verify CI + self-review | **GATE** — this session | CI + diff | — |
@@ -143,7 +143,7 @@ Spawn a subagent (`general-purpose`, or `EnterWorktree` first as above). Directi
 
 Spawn a subagent. Directive: read `02-implementation.md` + `git diff main...HEAD`, then
 audit the new/changed tests against the surface's testing-patterns skill
-(`react-testing-patterns` / `mamba-unit-test-patterns`; `test-slop-cop` for judgment).
+(`react-testing-patterns` / `mamba-unit-test-patterns`).
 
 Produce a **per-case justification table** in `03-test-audit.md` — one row per *test case*,
 not per file:
@@ -170,10 +170,54 @@ entirely when `Y = 0`.
 
 ### Phase 5 — De-slop
 
-Spawn a subagent. Directive: run `/clean-up-ai-slop` (and `/slop-review` for judgment) on
-the diff — strip excessive comments, cut line count, remove unnecessary new abstractions/
-defensive checks/`Any` casts that the change didn't need. Preserve behavior; re-run tests.
-Write `04-slop-report.md` (what was removed + net line delta).
+Phase 5 runs as two sequential agents — a focused simplifier, then the de-slop subagent —
+because `code-simplifier` is a narrow agent that won't write artifacts or run the comment
+audit.
+
+**5a — Simplify (trial).** Spawn Anthropic's official `code-simplifier` agent
+(`agentType: code-simplifier`) on the files the diff touched. It eliminates redundant code /
+abstractions, dense one-liners, and obvious comments while preserving behavior. Capture its
+returned summary. *We're trialing this — record in `04-slop-report.md` what it caught so we
+can judge whether it earns its place vs. `/clean-up-ai-slop` alone.* (Needs the
+`code-simplifier@claude-plugins-official` plugin enabled; if the agent type is unavailable,
+skip 5a, note it in the report, and run only 5b.)
+
+**5b — De-slop subagent.** Spawn a subagent. Directive: run `/clean-up-ai-slop` for the
+tells `code-simplifier` doesn't target — unnecessary new defensive checks / try-catch and
+`Any`/`any` casts the change didn't need — then cut any remaining line-count slop. Re-run
+the touched tests after both passes; preserve behavior.
+
+**Comment audit (enumerate, don't sample).** AI over-comments by default, and ~1 in 5
+LLM-written comments is factually wrong, so a comment is guilty until it earns its place.
+Build a per-comment table over *every* comment added or changed in `git diff main...HEAD`
+— one row per comment, mirroring phase 4's necessity breakdown:
+
+| Comment (`file:line`) | What it says | Keep-test | Verdict |
+|-----------------------|--------------|-----------|---------|
+
+A comment **survives only if it passes all of:**
+1. Explains **WHY** (intent, constraint, tradeoff, gotcha, rejected alternative) — not
+   what/how the code already shows.
+2. **Delete-and-reread:** removing it makes the code meaningfully harder to understand
+   *correctly*.
+3. Can't be dissolved by a **better name or an extracted function** — if it can, fix the
+   code and cut the comment.
+4. Is **true** against the current code (don't grant unverifiable AI claims the benefit of
+   the doubt).
+5. Is **one line** unless the why genuinely needs more — multi-line narration of an obvious
+   operation auto-fails.
+6. **No development-process leakage** — no PR/ticket/chat refs, "as requested", "added per
+   review", changelog/authorship, emoji. *Exception:* a `TODO` tied to a tracked ticket, or
+   a citation of a durable external reason (spec section, RFC, linked bug documenting a
+   workaround's why).
+
+Verdict ∈ `Keep` / `Rewrite` (a real why is buried in noise → compress to one line) /
+`Cut`. Enumerate *every* new/changed comment — don't sample. Then act hybrid, same as phase
+4: **auto-cut/auto-rewrite the unambiguous `Cut`/`Rewrite` rows** and re-run the touched
+tests to confirm still-green; leave debatable rows in place and list them. No new gate.
+
+Write `04-slop-report.md`: what `code-simplifier` caught in 5a (the trial signal), the
+comment-audit table, the non-comment slop removed in 5b, and the net line delta.
 
 ### Phase 6 — PR draft + description
 
