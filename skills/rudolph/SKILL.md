@@ -120,15 +120,19 @@ the user. Write the chosen approach + acceptance criteria (R1..Rn) to `01-archit
 
 ### Phase 3 — Implement + TDD
 
-Spawn a subagent (`general-purpose`, or `EnterWorktree` first as above). Directive:
+Spawn the **`developer`** agent (`agentType: developer`; `EnterWorktree` first as above if
+running as a background job). It owns the code-craft layer — strict **Red→Green→Refactor**
+TDD, SOLID/structural discipline, and the `de-slop` principles *while writing* — and delegates
+scope / acceptance-criteria bookkeeping to `craft:craft-implement`. Because it's a custom agent
+type, that context loads from its own system prompt even in a fresh worktree (no dependence on
+the repo's glob-scoped rules being generated there). Directive:
 - Read `00-plan.md` + `01-architecture.md`. Create/checkout the feature branch
   `<initials>/<ticket>/<short-name>` if it doesn't exist (this also satisfies the
   ticket-in-branch CI check).
-- Follow `craft:craft-implement` for the build, and the surface's testing skill for tests:
-  `react-testing-patterns` (frontend) or `mamba-unit-test-patterns` (backend). Work
-  **Red→Green**: write the failing test first, then make it pass. For a *small,
-  single-concern* change, skip `craft-implement` and build freeform from the artifacts —
-  craft's phase ceremony is overkill below feature size.
+- Use the surface's testing skill for tests: `react-testing-patterns` (frontend) or
+  `mamba-unit-test-patterns` (backend). For a *small, single-concern* change the developer
+  agent may build freeform and skip craft-implement's full ceremony — it's overkill below
+  feature size.
 - If tests/fixtures need a new test provider, use your project's designated test NPI
   (`<TEST_NPI>`); never reuse a placeholder/example NPI that other fixtures rely on.
 - Run the linters/tests it touched. Commit with the `Co-Authored-By` trailer the harness
@@ -174,6 +178,13 @@ Phase 5 runs as two sequential agents — a focused simplifier, then the de-slop
 because `code-simplifier` is a narrow agent that won't write artifacts or run the comment
 audit.
 
+The canonical de-slop rubric now lives in the portable **`de-slop`** skill
+(`dotfiles/.claude/skills/de-slop/`): the per-comment audit table + 6-point survival test, the
+single-use abstraction audit, the "audit `git diff <base>...HEAD`, not just the last commit"
+rule, and the cut-process-leakage rule. The 5b subagent should **invoke/follow that skill** as
+the source of truth; the detail restated below is a summary, so when the two differ, the
+`de-slop` skill wins.
+
 **5a — Simplify (trial).** Spawn Anthropic's official `code-simplifier` agent
 (`agentType: code-simplifier`) on the files the diff touched. It eliminates redundant code /
 abstractions, dense one-liners, and obvious comments while preserving behavior. Capture its
@@ -182,10 +193,21 @@ can judge whether it earns its place vs. `/clean-up-ai-slop` alone.* (Needs the
 `code-simplifier@claude-plugins-official` plugin enabled; if the agent type is unavailable,
 skip 5a, note it in the report, and run only 5b.)
 
-**5b — De-slop subagent.** Spawn a subagent. Directive: run `/clean-up-ai-slop` for the
-tells `code-simplifier` doesn't target — unnecessary new defensive checks / try-catch and
-`Any`/`any` casts the change didn't need — then cut any remaining line-count slop. Re-run
-the touched tests after both passes; preserve behavior.
+**5b — De-slop subagent.** Spawn a subagent. Directive: invoke the portable **`de-slop`**
+skill and follow its rubric (the canonical source for the audits summarized below), and run
+`/clean-up-ai-slop` for the tells `code-simplifier` doesn't target — unnecessary new defensive
+checks / try-catch and `Any`/`any` casts the change didn't need — then cut any remaining
+line-count slop. Re-run the touched tests after both passes; preserve behavior.
+
+**Abstraction audit (enumerate single-use indirections).** Beyond the line-count tells,
+list *every* new module-level constant, helper, or wrapper the change introduced and make it
+earn its place. A constant/helper read **exactly once** is usually just indirection — inline
+it and delete the definition — unless it (a) is referenced in ≥2 places, (b) names a
+genuinely cryptic literal whose meaning isn't obvious at the call site, or (c) is a
+documented config knob. A `NAME = "literal"` or `NAME = SomeEnum.MEMBER` used in a single
+spot fails this; so does a one-line helper wrapping a single expression. (A single-use
+string constant and a single-use enum-alias constant both slipped past a prior run because
+this check didn't exist — it does now.)
 
 **Comment audit (enumerate, don't sample).** AI over-comments by default, and ~1 in 5
 LLM-written comments is factually wrong, so a comment is guilty until it earns its place.
@@ -211,6 +233,14 @@ A comment **survives only if it passes all of:**
    a citation of a durable external reason (spec section, RFC, linked bug documenting a
    workaround's why).
 
+**"Explains why" is necessary, not sufficient.** A comment can name a real reason and still
+be slop if it's longer than that reason needs or narrates the adjacent operation alongside
+it. Compress to the single load-bearing clause; if the why is one phrase, the comment is one
+line. A 3–4 line block guarding a one-line call (an authz constraint, a merge-order note) is
+almost always over-written even when its content is genuinely "why" — `Rewrite` it, don't
+`Keep` it. Audit the whole change under review (`git diff main...HEAD`), not just the latest
+commit, so comments an earlier commit on the branch introduced are re-examined too.
+
 Verdict ∈ `Keep` / `Rewrite` (a real why is buried in noise → compress to one line) /
 `Cut`. Enumerate *every* new/changed comment — don't sample. Then act hybrid, same as phase
 4: **auto-cut/auto-rewrite the unambiguous `Cut`/`Rewrite` rows** and re-run the touched
@@ -230,10 +260,13 @@ code, not the workpad. Directive:
   (unlike frosty's *cloud* subagents, which can git-push but lack `gh`). Fallback: if `gh`
   is somehow unreachable, the subagent pushes + writes `05-pr-description.md`, and the
   conductor opens the PR from this session.
-- Write the description from the diff alone, in the user's canonical 4 sections —
-  **Description / How to test (numbered steps) / Reviewer guide / Checklist** — no
-  Follow-ups/Notes/Background sections. Save it to `05-pr-description.md` and set it as the
-  PR body. Record the PR number/URL in `state.pr`.
+- Generate the description by invoking the portable **`/pr-description`** skill — it owns the
+  format (the canonical 4 sections: **Description / How to test [numbered steps] / Reviewer
+  guide / Checklist**, diff-only, no Follow-ups/Notes/Background) and defers to the repo's own
+  `.github/pull_request_template.md` or PR-description rule when one exists. Pass the subagent
+  only the diff + file list so the skill's diff-only contract is preserved end-to-end. Save the
+  result to `05-pr-description.md`, set it as the PR body, and record the PR number/URL in
+  `state.pr`.
 
 ### Phase 7 — Cursor cloud E2E
 
