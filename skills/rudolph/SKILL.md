@@ -314,18 +314,53 @@ Spawn a subagent with a hard constraint: **it sees only `git diff main...HEAD` a
 file list — NOT the plan, architecture, or grilling transcript.** This is by design: the
 description must read for someone with zero prior context, generated from the objective
 code, not the workpad. Directive:
-- Draft the PR titled `[<ticket>] <description>`. Push the worktree's throwaway branch
-  straight to the canonical ref, then open the PR against that name **explicitly**:
-  `git push -u origin HEAD:refs/heads/<initials>/<ticket>/<short-name>` then
-  `gh pr create --draft --head <initials>/<ticket>/<short-name>` (pass `--head` — otherwise
-  `gh` infers the throwaway branch as the head). This is also where the ticket-in-branch CI
-  check is satisfied: the remote canonical branch carries the ticket even though the local
-  worktree branch doesn't. (Foreground/non-worktree runs already sit on the canonical branch,
-  so a plain `git push -u origin HEAD` + `gh pr create --draft` is equivalent.)
-  Local Agent-tool subagents inherit your machine's `gh` + auth, so this works in-subagent
-  (unlike frosty's *cloud* subagents, which can git-push but lack `gh`). Fallback: if `gh`
-  is somehow unreachable, the subagent pushes + writes `05-pr-description.md`, and the
-  conductor opens the PR from this session.
+- Draft the PR titled `[<ticket>] <description>`, then publish + open it. **Detect Graphite
+  first** (`gt log` populated — headway is, `gt` v1.8.6): the branch must end up *tracked* by
+  Graphite or it orphans from `gt log` / `gt restack` / `gt submit --stack`; a plain
+  `gh pr create` leaves it untracked. (Non-Graphite repo: skip the `gt` steps and use the
+  plain `git push` + `gh pr create --draft` shown under *foreground* below.)
+
+  *Worktree/background run* — HEAD is the throwaway branch and canonical is remote-only here,
+  so track it **without ever checking canonical out**, keeping the *Worktree lifecycle*
+  invariant intact:
+  1. `git push -u origin HEAD:refs/heads/<initials>/<ticket>/<short-name>` — publish to the
+     canonical ref. This is where the ticket-in-branch CI check is satisfied: the local
+     worktree branch lacks the ticket, but the remote canonical branch carries it.
+  2. `git branch -f <initials>/<ticket>/<short-name> HEAD` — materialize the canonical branch
+     as a *local ref* at this HEAD **without checking it out**. A ref is not a checkout, so it
+     triggers no two-worktree lock — the user can still `git checkout <canonical>` in their
+     main clone.
+  3. `gt track <initials>/<ticket>/<short-name> --parent <parent-branch>` — track the canonical
+     branch **by name; no checkout needed** (verified against `gt` v1.8.6: `gt track <branch>
+     --parent <parent>` tracks a non-current branch, and Graphite metadata lives in the shared
+     `.git` dir so the main clone's `gt log` sees it immediately). `<parent-branch>` is whatever
+     the feature was based on — `main` for rudolph's normal single-branch case, or the parent
+     feature branch for a genuine stack — and it must already be `gt track`ed (trunk always is;
+     a parent feature branch is if a prior rudolph run tracked it). **Never add `--force`:** it
+     overrides `--parent` and instead picks the nearest *already-tracked* ancestor, so on a
+     stack whose intermediate branches aren't tracked yet it silently collapses the topology
+     (skips them). With an explicit `--parent` there is no prompt, so `--force` buys nothing.
+  4. `gh pr create --draft --head <initials>/<ticket>/<short-name>` (pass `--head`, else `gh`
+     infers the throwaway branch). The branch is now *both* tracked by Graphite and backed by a
+     draft PR.
+
+  `gt submit` posts the stack comment and manages the base, but it acts on the *current* branch
+  (no `--branch` flag), so it needs canonical checked out — don't run it in the work worktree,
+  which would re-lock the branch. It's optional: after step 3 the branch is already a
+  first-class `gt log` member. To post the stack comment, run it later from the **main clone**
+  during phase 8: `git checkout <canonical> && gt submit --stack --no-edit` — it adopts the
+  existing PR by head-branch match (no duplicate).
+
+  *Foreground/non-worktree run* — already on canonical in the main clone: `git push -u origin
+  HEAD`, then `gt track --parent <parent-branch>` (if untracked; same parent rule as above) and
+  `gt submit --no-edit --draft`.
+  `gt submit` creates/updates the draft PR, sets the base, and adopts any existing PR (no dup),
+  so no separate `gh pr create` is needed.
+
+  Local Agent-tool subagents inherit your machine's `gh` + `gt` + auth, so this works
+  in-subagent (unlike frosty's *cloud* subagents, which lack both). Fallback: if `gt`/`gh` is
+  unreachable, the subagent pushes + writes `05-pr-description.md`, and the conductor finishes
+  the track/PR from this session.
 - Generate the description by invoking the portable **`/pr-description`** skill — it owns the
   format (the canonical 4 sections: **Description / How to test [numbered steps] / Reviewer
   guide / Checklist**, diff-only, no Follow-ups/Notes/Background) and defers to the repo's own
@@ -375,6 +410,12 @@ is deleted. See *Worktree lifecycle*. (Nothing to tear down for a foreground run
   review and where every commit lands (via push). In a background-job worktree the local branch
   is a throwaway (`state.worktree_branch`); it's never reviewed, never checked out by the user,
   and is deleted at teardown.
+- **Graphite repos** (`gt log` populated): the canonical branch must be `gt track`ed or it
+  orphans from `gt log` / `gt restack` / `gt submit --stack`. In a worktree, track it *by name*
+  after pushing — `git branch -f <canonical> HEAD` then `gt track <canonical> --parent <parent>`
+  — no checkout, no lock (Graphite metadata is shared across worktrees). Pass the real base as
+  `--parent` (`main`, or the parent branch for a stack); never `--force` — it ignores `--parent`
+  and collapses stacks by skipping untracked intermediates. See Phase 6.
 - PR body = the canonical 4 sections only; "How to test" is always a numbered list.
 - Cite `file:line` for codebase claims in artifacts; enumerate call sites, don't sample.
 - Test providers (phase 3 fixtures, phase 7 E2E): use your project's designated test NPI
