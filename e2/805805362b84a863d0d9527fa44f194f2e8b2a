@@ -1,0 +1,19 @@
+README.md
+  s_0f7066737e60a0::t_259178e82dc0ac 11,29-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "e2805805362b84a863d0d9527fa44f194f2e8b2a",
+  "prompts": {},
+  "sessions": {
+    "s_0f7066737e60a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "16c8c5cf-88b3-4384-8dc3-b5d605c56287",
+        "model": "unknown"
+      },
+      "human_author": "raistlan <raistlan@users.noreply.github.com>"
+    }
+  }
+}
