@@ -1,6 +1,6 @@
 ---
 name: rudolph
-description: Use when the user says /rudolph (or asks to start, resume, or drive the rudolph pipeline) on a feature/ticket. Conductor that runs an 8-phase build pipeline — grill-me plan, craft-architect review, TDD implement, test audit, de-slop, diff-only PR description, Cursor cloud E2E, CI + self-review — keeping itself thin by delegating mechanical phases to fresh subagents and pausing at human gates. State lives in ~/development/workdiary/PIPELINE/<ticket>/.
+description: Use when the user says /rudolph (or asks to start, resume, or drive the rudolph pipeline) on a feature/ticket. Conductor that runs an 8-phase build pipeline — interactive-grilling plan, craft-architect review, TDD implement, test audit, de-slop, diff-only PR description, Cursor cloud E2E, CI + self-review — keeping itself thin by delegating mechanical phases to fresh subagents and pausing at human gates. State lives in ~/development/workdiary/PIPELINE/<ticket>/.
 allowed-tools: Bash Read Edit Write Glob Grep Agent Skill AskUserQuestion TaskCreate TaskUpdate TaskList
 ---
 
@@ -24,7 +24,7 @@ Everything for a feature lives in `~/development/workdiary/PIPELINE/<ticket>/`:
 
 ```
 state.json          ← phase pointer, branch, surface, cursor run, pr — you own this
-00-plan.md          ← phase 1 output (grill-me)
+00-plan.md          ← phase 1 output (interactive-grilling)
 01-architecture.md  ← phase 2 output (craft-architect)
 02-implementation.md← phase 3 output (what changed + acceptance criteria)
 03-test-audit.md    ← phase 4 output
@@ -39,6 +39,7 @@ state.json          ← phase pointer, branch, surface, cursor run, pr — you o
   "ticket": "PROJ-123",
   "title": "[PROJ-123] Add foo widget to the bar dashboard",
   "branch": "abc/PROJ-123/foo-widget",
+  "worktree_branch": null,
   "surface": "frontend | backend | both",
   "phase": 3,
   "phases": {
@@ -51,6 +52,11 @@ state.json          ← phase pointer, branch, surface, cursor run, pr — you o
   "updated": "2026-06-02T00:00:00Z"
 }
 ```
+
+`branch` is the canonical feature branch — the single source of truth (what you review, the
+PR head, and where every pushed commit lands). `worktree_branch` is the throwaway branch a
+background-job worktree commits onto locally before pushing to `branch` (see *Worktree
+lifecycle*); it's `null` when not running in a worktree.
 
 ## Boot / resume sequence
 
@@ -66,17 +72,63 @@ state.json          ← phase pointer, branch, surface, cursor run, pr — you o
    all phases `pending`. Ask the user for the feature surface (frontend / backend / both)
    if it isn't obvious from context — it selects the testing skill in phases 3–4.
 5. If you're modifying code **and** running as a background job, `EnterWorktree` before any
-   write phase so you don't collide with the user's working copy.
+   write phase so you don't collide with the user's working copy. Leave the worktree on the
+   branch `EnterWorktree` created — never check out the canonical feature branch inside it
+   (see *Worktree lifecycle*).
 
 Then run the phase you're pointed at. After each phase: update `state.json`
 (`phases.<n>` → `done`, bump `phase`, set `updated`), write the artifact, and tell the
 user what's next. Bump the pointer **before** yielding so a crash resumes cleanly.
 
+## Worktree lifecycle (background jobs)
+
+When rudolph runs as a background job it works inside a git worktree so it never collides
+with your primary clone. Git forbids one branch being checked out in two worktrees at once
+(`fatal: '<branch>' is already used by worktree at ...`), so two rules keep the worktree
+from ever blocking you from checking out the feature branch yourself:
+
+1. **The worktree never checks out the canonical branch.** `EnterWorktree` puts the
+   worktree on its own throwaway branch; rudolph stays there and records that name as
+   `worktree_branch` (`git rev-parse --abbrev-ref HEAD` — discover it, don't assume it).
+   Because the canonical name is never checked out here, it can never be locked — you can
+   `git checkout <branch>` in your primary clone at any time, even mid-run.
+2. **Commits land on the canonical branch at push time.** Work is committed on the
+   throwaway branch locally, then pushed straight to the canonical ref:
+   `git push -u origin HEAD:refs/heads/<initials>/<ticket>/<short-name>`. The canonical
+   branch is the single source of truth — what you review, the PR head, and the home of
+   every commit on the remote. The throwaway local branch is an implementation detail you
+   never touch.
+
+**Teardown (hygiene).** When the pipeline is marked `complete` (phase 8's warm-hold is
+over), remove the worktree so directories don't pile up. First confirm the worktree HEAD is
+fully pushed (`git rev-parse HEAD` == `git rev-parse origin/<canonical>`), then `ExitWorktree`
+with `action: "remove"`, `discard_changes: true`. Discarding is safe — the commits live on
+the canonical branch (remote + your main clone); only the throwaway branch is deleted. If a
+worktree directory was ever removed by hand, its admin files linger in `$GIT_DIR/worktrees`
+and still show in `git worktree list` until `git worktree prune` clears them.
+
+**Review-cycle re-entry.** A follow-up worktree may safely branch *off* the canonical branch
+even while the user has that branch checked out in their primary clone — git blocks a second
+*checkout* of a branch, not branching from it. The one hazard is the **base ref**: a review
+fix must be based on the canonical tip (`origin/<initials>/<ticket>/<short-name>`), not `main`,
+or it silently builds on the wrong base and drops the PR's existing commits. During phase 8's
+warm-hold the original worktree is still live on its throwaway branch (upstream =
+origin/canonical) — **reuse it**. Only after teardown (cold re-entry) do you need a fresh
+worktree; create it off the canonical tip, e.g. `git worktree add -b <throwaway> <path>
+origin/<initials>/<ticket>/<short-name>`. Note `EnterWorktree`'s default `fresh` base is
+`origin/<default-branch>` (main), which would miss the PR work — override the base or
+`git reset --hard origin/<canonical>` in the new worktree before committing.
+
+**Escape hatch.** If a worktree ever does hold a branch you need, `git worktree remove
+<path>` frees it and the branch ref survives; as a last resort `git checkout
+--ignore-other-worktrees <branch>` forces the checkout, but it bypasses git's
+divergence guard (two worktrees on one branch), so avoid it in the pipeline.
+
 ## The eight phases
 
 | # | Phase | Runs as | Reads | Writes |
 |---|-------|---------|-------|--------|
-| 1 | Plan (shared understanding) | **GATE** — `/grill-me` in this session | — | `00-plan.md` |
+| 1 | Plan (shared understanding) | **GATE** — `/interactive-grilling` in this session | — | `00-plan.md` |
 | 2 | Architecture review | **GATE** — `craft-architect` loop in this session | `00-plan.md` | `01-architecture.md` |
 | 3 | Implement + TDD (Red→Green) | subagent | `00`,`01` | `02-implementation.md` |
 | 4 | Test audit + necessity breakdown | subagent (+ conditional gate) | `02` + diff | `03-test-audit.md` |
@@ -103,10 +155,13 @@ user what's next. Bump the pointer **before** yielding so a crash resumes cleanl
 
 ### Phase 1 — Plan
 
-Invoke `/grill-me` to develop the plan and reach shared understanding. When the dialogue
-converges, capture the agreed plan (problem, approach, scope, open risks) into
-`00-plan.md`. This is the one phase whose transcript legitimately lives in the main
-session — it's the part that genuinely needs you.
+Invoke `/interactive-grilling` to develop the plan and reach shared understanding. It
+stress-tests the design one question at a time, driving a decisions buffer at
+`/tmp/grill-<topic>-decisions.md`. When the dialogue converges, use that buffer as the
+drop-in feed for `00-plan.md`: the answered decisions (id, question, resolved answer) form
+the plan body, and the pruned decisions go in an appendix (id, question, `pruned_by`) for
+the record. This is the one phase whose transcript legitimately lives in the main session —
+it's the part that genuinely needs you.
 
 ### Phase 2 — Architecture review
 
@@ -126,9 +181,13 @@ TDD, SOLID/structural discipline, and the `de-slop` principles *while writing* �
 scope / acceptance-criteria bookkeeping to `craft:craft-implement`. Because it's a custom agent
 type, that context loads from its own system prompt even in a fresh worktree (no dependence on
 the repo's glob-scoped rules being generated there). Directive:
-- Read `00-plan.md` + `01-architecture.md`. Create/checkout the feature branch
-  `<initials>/<ticket>/<short-name>` if it doesn't exist (this also satisfies the
-  ticket-in-branch CI check).
+- Read `00-plan.md` + `01-architecture.md`. Stay on the worktree's own branch — do **not**
+  check out the canonical `<initials>/<ticket>/<short-name>` name (that would lock it against
+  the user's main clone; see *Worktree lifecycle*). Record the worktree branch
+  (`git rev-parse --abbrev-ref HEAD`) as `worktree_branch` in `state.json`. The canonical
+  branch is created on the remote at push time in phase 6, which is where the ticket-in-branch
+  CI check is satisfied. (Not in a worktree — e.g. a foreground run — checkout the canonical
+  branch directly as before.)
 - Use the surface's testing skill for tests: `react-testing-patterns` (frontend) or
   `mamba-unit-test-patterns` (backend). For a *small, single-concern* change the developer
   agent may build freeform and skip craft-implement's full ceremony — it's overkill below
@@ -252,10 +311,17 @@ comment-audit table, the non-comment slop removed in 5b, and the net line delta.
 ### Phase 6 — PR draft + description
 
 Spawn a subagent with a hard constraint: **it sees only `git diff main...HEAD` and the
-file list — NOT the plan, architecture, or grill-me transcript.** This is by design: the
+file list — NOT the plan, architecture, or grilling transcript.** This is by design: the
 description must read for someone with zero prior context, generated from the objective
 code, not the workpad. Directive:
-- Draft the PR (push branch, `gh pr create --draft`) titled `[<ticket>] <description>`.
+- Draft the PR titled `[<ticket>] <description>`. Push the worktree's throwaway branch
+  straight to the canonical ref, then open the PR against that name **explicitly**:
+  `git push -u origin HEAD:refs/heads/<initials>/<ticket>/<short-name>` then
+  `gh pr create --draft --head <initials>/<ticket>/<short-name>` (pass `--head` — otherwise
+  `gh` infers the throwaway branch as the head). This is also where the ticket-in-branch CI
+  check is satisfied: the remote canonical branch carries the ticket even though the local
+  worktree branch doesn't. (Foreground/non-worktree runs already sit on the canonical branch,
+  so a plain `git push -u origin HEAD` + `gh pr create --draft` is equivalent.)
   Local Agent-tool subagents inherit your machine's `gh` + auth, so this works in-subagent
   (unlike frosty's *cloud* subagents, which can git-push but lack `gh`). Fallback: if `gh`
   is somehow unreachable, the subagent pushes + writes `05-pr-description.md`, and the
@@ -292,12 +358,23 @@ push: bugbot/CodeOwners/reviewers routinely flag the just-pushed commit within m
 the user wants the follow-up fix on *this* session (full context) rather than a cold respawn.
 Mark the pipeline `complete` in `state.json` and append a one-liner to the run dir only after
 the review window quiets or the user says "done with this PR." During the warm-hold, treat a
-new review comment as a return to phase 3 (small) on the same branch.
+new review comment as a return to phase 3 (small) on the **worktree** branch, re-pushed to
+the canonical ref exactly as phase 6 did.
+
+**Teardown on completion (background jobs).** When you mark the pipeline `complete`, remove
+the worktree so directories don't accumulate: confirm the worktree HEAD is fully pushed to
+the canonical branch, then `ExitWorktree` with `action: "remove"`, `discard_changes: true`.
+This is safe — the commits live on the canonical branch; only the throwaway worktree branch
+is deleted. See *Worktree lifecycle*. (Nothing to tear down for a foreground run.)
 
 ## Conventions (match the user's defaults)
 
 - Branch `<initials>/<TICKET>/<short-name>`; PR title `[<TICKET>] <description>`; reuse the parent
   ticket for follow-ups unless the user names a new one.
+- **Canonical branch = single source of truth.** `<initials>/<TICKET>/<short-name>` is what you
+  review and where every commit lands (via push). In a background-job worktree the local branch
+  is a throwaway (`state.worktree_branch`); it's never reviewed, never checked out by the user,
+  and is deleted at teardown.
 - PR body = the canonical 4 sections only; "How to test" is always a numbered list.
 - Cite `file:line` for codebase claims in artifacts; enumerate call sites, don't sample.
 - Test providers (phase 3 fixtures, phase 7 E2E): use your project's designated test NPI
