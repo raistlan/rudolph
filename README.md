@@ -8,7 +8,7 @@ mechanical work to fresh subagents and pausing at human gates. Sibling to `frost
 
 | # | Phase | How |
 |---|-------|-----|
-| 1 | Plan / shared understanding | `/grill-me` (gate) |
+| 1 | Plan / shared understanding | `/interactive-grilling` (gate) |
 | 2 | Architecture review | `craft-architect` loop (gate) |
 | 3 | Implement + TDD (Red→Green) | subagent + `react-`/`mamba-` testing patterns |
 | 4 | Test audit | subagent |
@@ -26,7 +26,18 @@ gate and re-run `/rudolph <ticket>`.
 Running all eight phases in one window degrades quality by the end. rudolph holds only
 the state ledger; phases 3–6 run in subagents whose heavy context is discarded, handing
 off through on-disk artifacts. Phase 6 sees **only** `git diff` — so the PR description
-can't be polluted by the grill-me/architecture context, which is exactly the goal.
+can't be polluted by the grilling/architecture context, which is exactly the goal.
+
+## Worktree lifecycle
+
+As a background job, rudolph works in a git worktree. It keeps that worktree on a
+throwaway branch and **never checks out the canonical feature branch** there — so the
+canonical name is never locked, and you can `git checkout <branch>` in your primary clone
+any time, even mid-run. Commits land on the canonical branch at push time
+(`git push origin HEAD:refs/heads/<branch>`); that branch is the single source of truth
+you review and open the PR from. On completion rudolph removes the worktree (the commits
+are safely on the canonical branch), so directories don't pile up. See the skill's
+*Worktree lifecycle* section for the full contract.
 
 ## Setup
 
